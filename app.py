@@ -7,6 +7,7 @@ Then open: http://localhost:5000
 
 from gevent import monkey
 monkey.patch_all()
+import gevent
 
 import base64
 import threading
@@ -30,12 +31,11 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
 state_lock = threading.RLock()
 detector = StudyDetector()
 
-session_state = "IDLE"  # IDLE | CALIBRATING_COUNTDOWN | CALIBRATING_CAPTURING | MONITORING
-calibration_start_time = 0.0
+session_state = "IDLE"  # IDLE | CALIBRATING_CAPTURING | MONITORING
 calib_frames = []
-last_countdown_sec = 6
 last_emit_time = 0.0
 last_stat_tick = 0.0
+calibration_greenlet = None
 
 session_stats = {
     "total_seconds": 0,
@@ -126,72 +126,104 @@ def _decode_frame(b64_str):
         print(f"[_decode_frame] error: {e}")
         return None
 
+
+def _calibration_greenlet():
+    """Runs the countdown + capture phase entirely server-side on a timer.
+    Completely independent of frame arrival rate."""
+    global session_state, calib_frames, last_emit_time, last_stat_tick
+
+    # -- Countdown phase (5 seconds) --
+    for seconds_left in range(5, 0, -1):
+        with state_lock:
+            if session_state == "IDLE":
+                return  # Session was stopped
+        socketio.emit("calibration_status", {"phase": "countdown", "seconds_left": seconds_left})
+        gevent.sleep(1)
+
+    # -- Switch to capturing phase --
+    with state_lock:
+        if session_state == "IDLE":
+            return
+        session_state = "CALIBRATING_CAPTURING"
+        calib_frames = []
+    socketio.emit("calibration_status", {"phase": "capturing", "progress": 0})
+
+    # -- Collect frames for up to 15 seconds (30 frames at ~10fps) --
+    deadline = time.time() + 15.0
+    while time.time() < deadline:
+        with state_lock:
+            if session_state == "IDLE":
+                return
+            n = len(calib_frames)
+        if n >= 30:
+            break
+        gevent.sleep(0.1)
+
+    # -- Run baseline calculation --
+    with state_lock:
+        frames_copy = list(calib_frames)
+
+    baseline = detector.record_baseline(frames_copy)
+    with state_lock:
+        if session_state == "IDLE":
+            return
+        if baseline is None:
+            session_state = "IDLE"
+            socketio.emit("calibration_status", {"phase": "complete", "success": False})
+        else:
+            session_state = "MONITORING"
+            socketio.emit("calibration_status", {"phase": "complete", "success": True})
+            last_stat_tick = time.time()
+            last_emit_time = time.time()
+
+
 @socketio.on("client_frame")
 def handle_client_frame(data):
-    global session_state, calibration_start_time, calib_frames, last_countdown_sec, last_emit_time, last_stat_tick
-    
+    global last_emit_time, last_stat_tick
+
     b64_frame = data.get("image")
     if not b64_frame:
         return
-        
+
     frame = _decode_frame(b64_frame)
     if frame is None:
         return
-        
+
     now = time.time()
-    
+
     with state_lock:
-        if session_state == "CALIBRATING_COUNTDOWN":
-            elapsed = now - calibration_start_time
-            seconds_left = 5 - int(elapsed)
-            
-            if seconds_left <= 0:
-                session_state = "CALIBRATING_CAPTURING"
-                calib_frames = []
-                socketio.emit("calibration_status", {"phase": "capturing", "progress": 0})
-            else:
-                if seconds_left != last_countdown_sec:
-                    last_countdown_sec = seconds_left
-                    socketio.emit("calibration_status", {"phase": "countdown", "seconds_left": seconds_left})
-                
-                # Emit the raw frame during countdown
-                _emit_raw_frame(frame)
-                
-        elif session_state == "CALIBRATING_CAPTURING":
+        current_state = session_state
+
+    if current_state == "CALIBRATING_COUNTDOWN":
+        # Just show the raw frame; the greenlet handles countdown ticks
+        _emit_raw_frame(frame)
+
+    elif current_state == "CALIBRATING_CAPTURING":
+        with state_lock:
             calib_frames.append(frame.copy())
-            progress = int((len(calib_frames) / 30) * 100)
-            socketio.emit("calibration_status", {"phase": "capturing", "progress": progress})
-            _emit_raw_frame(frame)
-            
-            if len(calib_frames) >= 30:
-                baseline = detector.record_baseline(calib_frames)
-                if baseline is None:
-                    session_state = "IDLE"
-                    socketio.emit("calibration_status", {"phase": "complete", "success": False})
-                else:
-                    session_state = "MONITORING"
-                    socketio.emit("calibration_status", {"phase": "complete", "success": True})
-                    last_stat_tick = time.time()
-                    last_emit_time = time.time()
-                    
-        elif session_state == "MONITORING":
-            try:
-                result = detector.process_frame(frame)
-            except Exception as e:
-                print(f"[handle_client_frame] detector processing error: {e}")
-                return
-                
-            dt = now - last_stat_tick
-            last_stat_tick = now
-            _update_session_stats(result, dt)
-            
-            if now - last_emit_time >= 0.1:  # throttle to ~10fps
-                frame_b64 = _encode_frame(frame)
-                payload = dict(result)
-                payload["frame"] = frame_b64
-                payload["session_seconds"] = int(session_stats["total_seconds"])
-                socketio.emit("update", payload)
-                last_emit_time = now
+            n = len(calib_frames)
+        progress = int(min(n / 30, 1.0) * 100)
+        socketio.emit("calibration_status", {"phase": "capturing", "progress": progress})
+        _emit_raw_frame(frame)
+
+    elif current_state == "MONITORING":
+        try:
+            result = detector.process_frame(frame)
+        except Exception as e:
+            print(f"[handle_client_frame] detector processing error: {e}")
+            return
+
+        dt = now - last_stat_tick
+        last_stat_tick = now
+        _update_session_stats(result, dt)
+
+        if now - last_emit_time >= 0.1:  # throttle to ~10fps
+            frame_b64 = _encode_frame(frame)
+            payload = dict(result)
+            payload["frame"] = frame_b64
+            payload["session_seconds"] = int(session_stats["total_seconds"])
+            socketio.emit("update", payload)
+            last_emit_time = now
 
 
 def _encode_frame(frame):
@@ -228,21 +260,26 @@ def index():
 
 @app.route("/start", methods=["POST"])
 def start():
-    global session_state, calibration_start_time, calib_frames, last_countdown_sec, last_stat_tick
+    global session_state, calib_frames, calibration_greenlet
     with state_lock:
+        # Kill any existing calibration greenlet
+        if calibration_greenlet is not None and not calibration_greenlet.dead:
+            calibration_greenlet.kill()
         session_state = "CALIBRATING_COUNTDOWN"
-        calibration_start_time = time.time()
         calib_frames = []
-        last_countdown_sec = 6
         reset_session_stats()
+        calibration_greenlet = gevent.spawn(_calibration_greenlet)
     return jsonify({"status": "started"})
 
 
 @app.route("/stop", methods=["POST"])
 def stop():
-    global session_state
+    global session_state, calibration_greenlet
     with state_lock:
         session_state = "IDLE"
+        if calibration_greenlet is not None and not calibration_greenlet.dead:
+            calibration_greenlet.kill()
+            calibration_greenlet = None
     return jsonify({"status": "stopped"})
 
 
