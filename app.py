@@ -27,7 +27,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
 # ---------------------------------------------------------------------------
 # Global state (single-user app -> module-level globals are fine here)
 # ---------------------------------------------------------------------------
-state_lock = threading.Lock()
+state_lock = threading.RLock()
 detector = StudyDetector()
 
 session_state = "IDLE"  # IDLE | CALIBRATING_COUNTDOWN | CALIBRATING_CAPTURING | MONITORING
