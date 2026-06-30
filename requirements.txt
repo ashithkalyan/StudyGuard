@@ -1,0 +1,16 @@
+flask==3.0.3
+flask-socketio==5.3.6
+gevent
+gevent-websocket
+numpy==1.26.4
+mediapipe==0.10.14
+ultralytics==8.2.50
+python-socketio==5.11.3
+python-engineio==4.9.1
+
+# NOTE on opencv:
+# Do not add a separate "opencv-python" pin here. mediapipe pulls in
+# opencv-contrib-python and ultralytics pulls in opencv-python as transitive
+# dependencies, and both provide the same "cv2" module. Installing all three
+# together is normal for this stack and works correctly - pip may print a
+# harmless dependency-resolver warning about it, which can be ignored.

@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: studyguard-ai
+    env: docker
+    plan: free
+    region: oregon
+    envVars:
+      - key: DISABLE_YOLO
+        value: "true" # Set to "true" to fit in Render Free Tier (512MB RAM). Set to "false" to enable cell phone detection if you upgrade to Render Starter plan.
