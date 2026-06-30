@@ -422,6 +422,11 @@ startBtn.addEventListener('click', async () => {
       document.body.appendChild(videoEl);
     }
     videoEl.srcObject = localStream;
+    try {
+      await videoEl.play();
+    } catch (playErr) {
+      console.warn('[Webcam] videoEl.play() failed:', playErr);
+    }
 
     let canvasEl = document.getElementById('client-canvas');
     if (!canvasEl) {
@@ -439,7 +444,7 @@ startBtn.addEventListener('click', async () => {
 
     if (statusData.status === 'started' || statusData.status === 'already_running') {
       streamInterval = setInterval(() => {
-        if (videoEl.readyState === videoEl.HAVE_ENOUGH_DATA) {
+        if (videoEl.readyState >= 2) { // 2 = HAVE_CURRENT_DATA (frame is available)
           ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
           const base64Frame = canvasEl.toDataURL('image/jpeg', 0.6);
           socket.emit('client_frame', { image: base64Frame });
