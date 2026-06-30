@@ -26,4 +26,4 @@ COPY . .
 EXPOSE 5000
 
 # Start the application using Gunicorn with Gevent WebSocket worker
-CMD ["gunicorn", "-k", "geventwebsocket.gunicorn.workers.GeventWebSocketWorker", "-w", "1", "--bind", "0.0.0.0:5000", "app:app"]
+CMD ["gunicorn", "-k", "geventwebsocket.gunicorn.workers.GeventWebSocketWorker", "-w", "1", "--timeout", "120", "--bind", "0.0.0.0:5000", "app:app"]
